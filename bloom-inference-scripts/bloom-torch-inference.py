@@ -56,7 +56,7 @@ print(f"*** Loading the model {model_name}")
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModelForCausalLM.from_pretrained(model_name)
 
-model = model.eval()
+model = model.eval().to("cuda")
 
 # Some models like GPT2 do not have a PAD token so we have to set it if necessary
 if tokenizer.pad_token is None:
