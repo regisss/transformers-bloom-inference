@@ -58,6 +58,11 @@ model = AutoModelForCausalLM.from_pretrained(model_name)
 
 model = model.eval()
 
+# Some models like GPT2 do not have a PAD token so we have to set it if necessary
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+    model.generation_config.pad_token_id = model.generation_config.eos_token_id
+
 if args.benchmark:
     t_ready = time.time()
 
