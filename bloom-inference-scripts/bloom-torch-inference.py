@@ -32,11 +32,7 @@ parser = ArgumentParser()
 
 parser.add_argument("--name", required=True, type=str, help="model_name")
 parser.add_argument(
-    "--dtype",
-    type=str,
-    help="float16 or int8",
-    choices=["int8", "float16"],
-    default="float16",
+    "--bf16", action="store_true", help="Whether to run the model in bf16 precision."
 )
 parser.add_argument("--batch_size", default=1, type=int, help="batch size")
 parser.add_argument(
@@ -54,7 +50,12 @@ infer_dtype = args.dtype
 print(f"*** Loading the model {model_name}")
 
 tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForCausalLM.from_pretrained(model_name)
+
+if args.bf16:
+    torch_dtype = torch.bfloat16
+else:
+    torch_dtype = torch.float
+model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch_dtype)
 
 model = model.eval().to("cuda")
 
