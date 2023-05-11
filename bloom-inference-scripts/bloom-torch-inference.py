@@ -45,17 +45,15 @@ args = parser.parse_args()
 
 
 model_name = args.name
-infer_dtype = args.dtype
+if args.bf16:
+    infer_dtype = torch.bfloat16
+else:
+    infer_dtype = torch.float
 
 print(f"*** Loading the model {model_name}")
 
 tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-if args.bf16:
-    torch_dtype = torch.bfloat16
-else:
-    torch_dtype = torch.float
-model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch_dtype)
+model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=infer_dtype)
 
 model = model.eval().to("cuda")
 
