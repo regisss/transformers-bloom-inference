@@ -16,7 +16,6 @@
 
 
 import gc
-import io
 import json
 import math
 import os
@@ -34,8 +33,18 @@ from transformers.models.bloom.modeling_bloom import BloomBlock as BloomBlock
 from transformers.utils import is_offline_mode
 
 
+def model_is_bloom(config):
+    """
+    Checks if the given config belongs to a BLOOM-like model.
+    """
+    return "bloom" in config.architectures[0].lower()
+
+
 # the Deepspeed team made these so it's super fast to load (~1 minute), rather than wait 10-20min loading time.
-tp_presharded_models = ["microsoft/bloom-deepspeed-inference-int8", "microsoft/bloom-deepspeed-inference-fp16"]
+tp_presharded_models = [
+    "microsoft/bloom-deepspeed-inference-int8",
+    "microsoft/bloom-deepspeed-inference-fp16",
+]
 
 t_start = time.time()
 
@@ -44,10 +53,20 @@ num_tokens = 100
 parser = ArgumentParser()
 
 parser.add_argument("--name", required=True, type=str, help="model_name")
-parser.add_argument("--dtype", type=str, help="float16 or int8", choices=["int8", "float16"], default="float16")
-parser.add_argument("--local_rank", required=False, type=int, help="used by dist launchers")
+parser.add_argument(
+    "--dtype",
+    type=str,
+    help="float16 or int8",
+    choices=["int8", "float16"],
+    default="float16",
+)
+parser.add_argument(
+    "--local_rank", required=False, type=int, help="used by dist launchers"
+)
 parser.add_argument("--batch_size", default=1, type=int, help="batch size")
-parser.add_argument("--benchmark", action="store_true", help="additionally run benchmark")
+parser.add_argument(
+    "--benchmark", action="store_true", help="additionally run benchmark"
+)
 args = parser.parse_args()
 
 local_rank = int(os.getenv("LOCAL_RANK", "0"))
@@ -95,7 +114,11 @@ def get_checkpoint_files(model_name_or_path):
 
     # extensions: .bin | .pt
     # creates a list of paths from all downloaded files in cache dir
-    file_list = [str(entry) for entry in Path(cached_repo_dir).rglob("*.[bp][it][n]") if entry.is_file()]
+    file_list = [
+        str(entry)
+        for entry in Path(cached_repo_dir).rglob("*.[bp][it][n]")
+        if entry.is_file()
+    ]
     return file_list
 
 
@@ -110,6 +133,8 @@ print_rank0(f"*** Loading the model {model_name}")
 
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 config = AutoConfig.from_pretrained(model_name)
+
+is_bloom = model_is_bloom(config)
 
 # XXX: can't automatically derive dtype via config's `from_pretrained`
 # dtype = torch.bfloat16 if model_name in ["bigscience/bloom", "bigscience/bigscience-small-testing"] else torch.float16
@@ -132,9 +157,15 @@ if args.benchmark:
     gc.collect()
     deepspeed.runtime.utils.see_memory_usage("pre-from-pretrained", force=True)
 
-# Construct model with fake meta tensors, later will be replaced during ds-inference ckpt load
-with deepspeed.OnDevice(dtype=dtype, device="meta"):
-    model = AutoModelForCausalLM.from_config(config, torch_dtype=torch.bfloat16)
+if is_bloom:
+    # Construct model with fake meta tensors, later will be replaced during ds-inference ckpt load
+    with deepspeed.OnDevice(dtype=dtype, device="meta"):
+        model = AutoModelForCausalLM.from_config(config, torch_dtype=torch.bfloat16)
+else:
+    with deepspeed.OnDevice(dtype=dtype, device="cuda"):
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name, torch_dtype=torch.bfloat16
+        )
 
 if args.benchmark:
     deepspeed.runtime.utils.see_memory_usage("post-from-pretrained", force=True)
@@ -148,14 +179,14 @@ if args.benchmark:
 
 ### Deepspeed-Inference Loading
 
-checkpoints_json = "checkpoints.json"
+if is_bloom:
+    checkpoints_json = "checkpoints.json"
 
-
-def write_checkpoints_json():
-    checkpoint_files = get_checkpoint_files(model_name)
-    if rank == 0:
-        data = {"type": "BLOOM", "checkpoints": checkpoint_files, "version": 1.0}
-        json.dump(data, open(checkpoints_json, "w"))
+    def write_checkpoints_json():
+        checkpoint_files = get_checkpoint_files(model_name)
+        if rank == 0:
+            data = {"type": "BLOOM", "checkpoints": checkpoint_files, "version": 1.0}
+            json.dump(data, open(checkpoints_json, "w"))
 
 
 if args.benchmark:
@@ -163,27 +194,33 @@ if args.benchmark:
     gc.collect()
     deepspeed.runtime.utils.see_memory_usage("pre-ds-inference-init", force=True)
 
-if kernel_inject:
-    kwargs = dict(replace_with_kernel_inject=True)
-else:
-    kwargs = dict(injection_policy={BloomBlock: ("self_attention.dense", "mlp.dense_4h_to_h")})
+if is_bloom:
+    if kernel_inject:
+        kwargs = dict(replace_with_kernel_inject=True)
+    else:
+        kwargs = dict(
+            injection_policy={BloomBlock: ("self_attention.dense", "mlp.dense_4h_to_h")}
+        )
 
-repo_root = get_repo_root(model_name)
-if tp_presharded_mode:
-    # tp presharded repos come with their own checkpoints config file
-    checkpoints_json = os.path.join(repo_root, "ds_inference_config.json")
+    repo_root = get_repo_root(model_name)
+    if tp_presharded_mode:
+        # tp presharded repos come with their own checkpoints config file
+        checkpoints_json = os.path.join(repo_root, "ds_inference_config.json")
+    else:
+        # for normal bloom repo we need to write the checkpoints config file
+        write_checkpoints_json()
+        dist.barrier()
+
+    kwargs["checkpoint"] = checkpoints_json
+    kwargs["base_dir"] = repo_root
 else:
-    # for normal bloom repo we need to write the checkpoints config file
-    write_checkpoints_json()
-    dist.barrier()
+    kwargs = {}
 
 # checkpoints_json=None
 model = deepspeed.init_inference(
     model,
     mp_size=world_size,
-    base_dir=repo_root,
     dtype=getattr(torch, infer_dtype),
-    checkpoint=checkpoints_json,
     **kwargs,
 )
 
@@ -230,7 +267,9 @@ inputs = input_sentences[: args.batch_size]
 def generate():
     """returns a list of zipped inputs, outputs and number of new tokens"""
 
-    input_tokens = tokenizer.batch_encode_plus(inputs, return_tensors="pt", padding=True)
+    input_tokens = tokenizer.batch_encode_plus(
+        inputs, return_tensors="pt", padding=True
+    )
     for t in input_tokens:
         if torch.is_tensor(input_tokens[t]):
             input_tokens[t] = input_tokens[t].to(torch.cuda.current_device())
@@ -240,7 +279,9 @@ def generate():
     input_tokens_lengths = [x.shape[0] for x in input_tokens.input_ids]
     output_tokens_lengths = [x.shape[0] for x in outputs]
 
-    total_new_tokens = [o - i for i, o in zip(input_tokens_lengths, output_tokens_lengths)]
+    total_new_tokens = [
+        o - i for i, o in zip(input_tokens_lengths, output_tokens_lengths)
+    ]
     outputs = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
     return zip(inputs, outputs, total_new_tokens)
