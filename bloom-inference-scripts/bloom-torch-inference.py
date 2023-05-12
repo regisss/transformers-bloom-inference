@@ -34,6 +34,11 @@ parser.add_argument("--name", required=True, type=str, help="model_name")
 parser.add_argument(
     "--bf16", action="store_true", help="Whether to run the model in bf16 precision."
 )
+parser.add_argument(
+    "--autocast",
+    action="store_true",
+    help="Whether to run the model in mixed-precision with Torch autocast.",
+)
 parser.add_argument("--batch_size", default=1, type=int, help="batch size")
 parser.add_argument(
     "--benchmark", action="store_true", help="additionally run benchmark"
@@ -105,7 +110,10 @@ def generate():
         if torch.is_tensor(input_tokens[t]):
             input_tokens[t] = input_tokens[t].to(torch.cuda.current_device())
 
-    outputs = model.generate(**input_tokens, **generate_kwargs)
+    with torch.autocast(
+        device_type="cuda", dtype=torch.bfloat16, enabled=args.autocast
+    ):
+        outputs = model.generate(**input_tokens, **generate_kwargs)
 
     input_tokens_lengths = [x.shape[0] for x in input_tokens.input_ids]
     output_tokens_lengths = [x.shape[0] for x in outputs]
